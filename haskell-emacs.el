@@ -409,54 +409,21 @@ executable HaskellEmacs
 
 (defun haskell-emacs--compile-command (heB)
   "Compile haskell-emacs with buffer HEB."
-  (if (eql 0
-           (let ((tool (haskell-emacs--get-build-tool)))
-             (if (eq tool 'cabal)
-                 (progn (message "Compiling ...")
-                        (+ (call-process "cabal" nil heB nil "sandbox" "init")
-                           (call-process "cabal" nil heB nil "install" "happy")
-                           (call-process "cabal" nil heB nil "install")))
-               (if (eq tool 'stack)
-                   (progn (unless (file-exists-p (concat haskell-emacs-dir "stack.yaml"))
-                            (with-temp-buffer
-                              (insert "
-resolver: lts-20.11
-packages:
-- '.'
-extra-deps:
-- github: francesquini/atto-lisp
-  commit: 5d740f86889648981b845e56b1a3496521899c81
-")
-                              (write-file (concat haskell-emacs-dir "stack.yaml"))))
-                          (message "Compiling ...")
-                          (+ (call-process "stack" nil heB nil "setup")
-                             (call-process "stack" nil heB nil "install")))
-                 (if (eq tool 'nix)
-                     (progn (unless (file-exists-p (concat haskell-emacs-dir "default.nix"))
-                              (with-temp-buffer (insert "
-{ nixpkgs ? import <nixpkgs> {} }:
-nixpkgs.pkgs.haskellPackages.callPackage ./HaskellEmacs.nix { }")
-                                                (write-file (concat haskell-emacs-dir "default.nix"))))
-                            (message "Compiling ...")
-                            (+ (call-process "nix-shell" nil heB nil "-p" "--pure" "cabal2nix" "--command" "cabal2nix . > HaskellEmacs.nix")
-                               (call-process "nix-build" nil heB nil))))))))
-      (kill-buffer heB)
+  (if (eql 1
+           (progn (message "Compiling ...")
+                  (setq test (+ ;; (call-process "cabal" nil heB nil "init")
+                              ;; (call-process "cabal" nil heB nil "install" "happy" "--overwrite-policy=always") -- just install
+                              (call-process "cabal" nil heB nil "install" "--overwrite-policy=always")))))
+      (progn
+        (message "Haskell compilation success!")
+        (kill-buffer heB))
     (let ((bug (with-current-buffer heB (buffer-string))))
       (kill-buffer heB)
       (error bug))))
 
 (defun haskell-emacs--set-bin ()
   "Set the path of the executable."
-  (setq haskell-emacs--bin
-        (let ((tool (haskell-emacs--get-build-tool)))
-          (if (eq tool 'nix)
-              (concat haskell-emacs-dir "result/bin/HaskellEmacs")
-            (if (eq tool 'stack)
-                (concat "~/.local/bin/HaskellEmacs" (when (eq system-type 'windows-nt) ".exe"))
-              (when (eq tool 'cabal)
-                (concat haskell-emacs-dir
-                        ".cabal-sandbox/bin/HaskellEmacs"
-                        (when (eq system-type 'windows-nt) ".exe"))))))))
+  (setq haskell-emacs--bin "~/.local/bin/HaskellEmacs"))
 
 (provide 'haskell-emacs)
 
