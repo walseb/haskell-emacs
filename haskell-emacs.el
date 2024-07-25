@@ -51,12 +51,12 @@
   :type 'string)
 
 (defcustom haskell-emacs-build-tool 'auto
- "Build tool for haskell-emacs.  Auto tries nix, stack and cabal in order."
- :group 'haskell-emacs
- :type '(choice (const auto)
-                (const nix)
-                (const stack)
-                (const cabal)))
+  "Build tool for haskell-emacs.  Auto tries nix, stack and cabal in order."
+  :group 'haskell-emacs
+  :type '(choice (const auto)
+                 (const nix)
+                 (const stack)
+                 (const cabal)))
 
 (defvar haskell-emacs--bin nil)
 (defvar haskell-emacs--api-hash)
@@ -70,6 +70,8 @@
 (defvar haskell-emacs--proc nil)
 (defvar haskell-emacs--response nil)
 (defvar haskell-emacs--table (make-hash-table))
+
+(defvar haskell-emacs-log-buffer (generate-new-buffer "haskell-emacs-log"))
 
 (defun haskell-emacs-filter (p xs)
   "Filter elements which satisfy P in XS."
@@ -89,8 +91,8 @@
 (defun haskell-emacs-init (&optional arg)
   "Initialize haskell FFI or reload it to reflect changed functions.
 
-When ARG, force installation dialog.
-Call `haskell-emacs-help' to read the documentation."
+  When ARG, force installation dialog.
+  Call `haskell-emacs-help' to read the documentation."
   (interactive "p")
 
   ;; Stores haskell-emacs package version hash
@@ -102,7 +104,6 @@ Call `haskell-emacs-help' to read the documentation."
                   "Foreign/Emacs.hs"
                   "Foreign/Emacs/Internal.hs"))
           (sha1 (buffer-string))))
-
 
   (let* ((first-time (unless (file-directory-p haskell-emacs-dir)
                        (if arg (haskell-emacs--install-dialog)
@@ -123,12 +124,15 @@ Call `haskell-emacs-help' to read the documentation."
     (haskell-emacs--stop-proc)
     (setq haskell-emacs--response nil)
 
+    (message "1")
     ;; Stores addittional functions/modules hash
     (setq haskell-emacs--function-hash
           (with-temp-buffer (mapc 'insert-file-contents funs)
                             (insert haskell-emacs-dir
                                     (format "%S" haskell-emacs-build-tool))
                             (sha1 (buffer-string))))
+
+    (message "2")
 
     ;; Based on the hashes of the API and additional modules
     ;; determines if a new compile round is needed
@@ -141,10 +145,17 @@ Call `haskell-emacs-help' to read the documentation."
                                               nil t)
                            (re-search-forward haskell-emacs--function-hash
                                               nil t))))))
+    (message "2-5")
+
+    (if has-changed
+        (message "it has changed")
+      (message "it hasn't changed"))
     (when has-changed (haskell-emacs--compile code))
 
+    (message "3")
     ;; Starts the support process and lists all exports
     (haskell-emacs--start-proc)
+    ;; (setq maan (haskell-emacs--fun-body 'test (apply 'list '("test"))))
     (setq funs (mapcar (lambda (f) (with-temp-buffer
                                      (insert-file-contents f)
                                      (buffer-string)))
@@ -156,17 +167,24 @@ Call `haskell-emacs-help' to read the documentation."
       (haskell-emacs--stop-proc)
       (error funs))
 
+    (message "4")
     ;; Now, tries to obtain the documentation for each exported function
     (setq docs (haskell-emacs--fun-body
                 'getDocumentation
                 (list (mapcar (lambda (x) (cadr (split-string x "\\.")))
                               (cadr funs))
                       docs)))
+    (message "5")
 
     ;; Tries to obtain the arity of each function
     (dotimes (a 2)
       (setq arity-list (haskell-emacs--fun-body 'arityList '()))
+      (if arity-list
+          (message (format "arity list: %s" arity-list))
+        (message "Arity list empty!!"))
+      (message "5-1")
       (when has-changed
+        (message "5-2")
         (haskell-emacs--compile
          (haskell-emacs--fun-body
           'formatCode
@@ -175,18 +193,30 @@ Call `haskell-emacs-help' to read the documentation."
                       (haskell-emacs--fun-body 'arityFormat
                                                (car (cdr funs))))
                 code)))))
+
+    (message "5-3")
     (let ((arity (cadr arity-list))
           (table-of-funs (make-hash-table :test 'equal)))
+      (message "5-4")
       (mapc (lambda (func)
+              (message (format "looping through: %s with arity: %s" func arity))
+
+              (message "5-5")
+
               (let ((id (car (split-string func "\\."))))
+                (message "5-6")
+
                 (puthash id
                          (concat (gethash id table-of-funs)
+
                                  (format "%S" (haskell-emacs--fun-wrapper
                                                (read func)
-                                               (read (pop arity))
+                                               (when arity
+                                                 (read (pop arity)))
                                                (pop docs))))
                          table-of-funs)))
             (cadr funs))
+      (message "6")
 
       ;; Creates a map for each function exported by the additional modules
       (maphash (lambda (key value)
@@ -195,6 +225,7 @@ Call `haskell-emacs-help' to read the documentation."
                      (insert value)
                      (eval-buffer))))
                table-of-funs))
+    (message "7")
 
     ;; When an additional argument was provided, describes how to run the example
     (when arg
@@ -208,8 +239,40 @@ For example (Matrix.transpose '((1 2 3) (4 5 6)))")
 Read C-h f haskell-emacs-init for more instructions")
           (message "Finished compiling haskell-emacs."))))))
 
+;; (defun haskell-emacs--filter (process output)
+;;   "Haskell PROCESS filter for OUTPUT from functions."
+;;   (with-current-buffer haskell-emacs-log-buffer
+;;     (save-excursion
+;;       (goto-char (point-max))
+;;       (insert (concat output "\n"))))
+;;   (unless (= 0 (length haskell-emacs--response))
+;;     (setq output (concat haskell-emacs--response output)
+;;           haskell-emacs--response nil))
+;;   (let ((header)
+;;         (dataLen)
+;;         (p))
+;;     (while (and (setq p (string-match ")" output))
+;;                 (setq header (read output))
+;;                 (setq dataLen (and (car-safe header) (+ (car header) 1 p)))
+;;                 (<=
+;;                  dataLen
+;;                  (length output)))
+;;       (let ((content (substring output (- dataLen (car header)) dataLen)))
+;;         (setq output (substring output dataLen))
+;;         (if (= 1 (length header)) (eval (read content))
+;;           (puthash (cadr header) content haskell-emacs--table)))))
+;;   (unless (= 0 (length output))
+;;     (setq haskell-emacs--response output)))
+
 (defun haskell-emacs--filter (process output)
   "Haskell PROCESS filter for OUTPUT from functions."
+  (message "Haskell filter update")
+  (when (not (buffer-live-p haskell-emacs-log-buffer))
+    (setq haskell-emacs-log-buffer (generate-new-buffer "haskell-emacs-log")))
+  (with-current-buffer haskell-emacs-log-buffer
+    (save-excursion
+      (goto-char (point-max))
+      (insert (concat output "\n"))))
   (unless (= 0 (length haskell-emacs--response))
     (setq output (concat haskell-emacs--response output)
           haskell-emacs--response nil))
@@ -217,8 +280,9 @@ Read C-h f haskell-emacs-init for more instructions")
         (dataLen)
         (p))
     (while (and (setq p (string-match ")" output))
-                (<= (setq header (read output)
-                          dataLen (+ (car header) 1 p))
+                (setq header (read output)
+                      dataLen (and (car-safe header) (+ (car header) 1 p)))
+                (<= dataLen
                     (length output)))
       (let ((content (substring output (- dataLen (car header)) dataLen)))
         (setq output (substring output dataLen))
@@ -229,6 +293,11 @@ Read C-h f haskell-emacs-init for more instructions")
 
 (defun haskell-emacs--fun-body (fun args)
   "Generate function body for FUN with ARGS."
+  ;; (setq testing (format "%S" (cons fun args)))
+  ;; (push (format "%S" (cons fun args)) thing)
+  (setq testing (format "%S" (cons fun args)))
+  ;; (process-send-string haskell-emacs--proc testing)
+  ;; (progn (process-send-string haskell-emacs--proc "test") (haskell-emacs--get 0))
   (process-send-string
    haskell-emacs--proc (format "%S" (cons fun args)))
   (haskell-emacs--get 0))
@@ -256,6 +325,7 @@ Read C-h f haskell-emacs-init for more instructions")
 
 (defun haskell-emacs--fun-wrapper (fun args docs)
   "Take FUN with ARGS and return wrappers in elisp with the DOCS."
+  (message (format "Calling fun wrapper with fun %s args %s docs %s" (or fun "NIL") (or args "NIL") (or docs "NIL")))
   `(progn (add-to-list
            'haskell-emacs--fun-list
            (defmacro ,fun ,args
@@ -313,6 +383,7 @@ dyadic xs ys = map (\\x -> map (x*) ys) xs")
 (defun haskell-emacs--get (id)
   "Retrieve result from haskell process with ID."
   (while (not (gethash id haskell-emacs--table))
+    (message "Awaiting haskell input")
     (accept-process-output haskell-emacs--proc))
   (let ((res (read (gethash id haskell-emacs--table))))
     (remhash id haskell-emacs--table)
@@ -324,6 +395,7 @@ dyadic xs ys = map (\\x -> map (x*) ys) xs")
         (eval res)
       res)))
 
+;; (haskell-emacs--start-proc)
 (defun haskell-emacs--start-proc ()
   "Start an haskell-emacs process."
   (setq haskell-emacs--proc (start-process "hask" nil haskell-emacs--bin))
@@ -335,11 +407,13 @@ dyadic xs ys = map (\\x -> map (x*) ys) xs")
      (let ((debug-on-error t))
        (error "Haskell-emacs crashed")))))
 
+;; (haskell-emacs--stop-proc)
 (defun haskell-emacs--stop-proc ()
   "Stop haskell-emacs process."
   (when haskell-emacs--proc
     (set-process-sentinel haskell-emacs--proc nil)
-    (kill-process haskell-emacs--proc)
+    (when (process-live-p haskell-emacs--proc)
+      (kill-process haskell-emacs--proc))
     (setq haskell-emacs--proc nil)))
 
 (defun haskell-emacs--compile (code)
@@ -352,6 +426,7 @@ dyadic xs ys = map (\\x -> map (x*) ys) xs")
                   "-- hash of all functions: " haskell-emacs--function-hash
                   "\n" code)))
       (cd haskell-emacs-dir)
+      (envrc--update)
       (unless (and (file-exists-p heF)
                    (equal code (with-temp-buffer (insert-file-contents heF)
                                                  (buffer-string))))
@@ -393,9 +468,14 @@ executable HaskellEmacs
           (insert-file-contents (concat (file-name-directory haskell-emacs--load-dir)
                                         "Foreign/Emacs/Internal.hs"))
           (write-file "Foreign/Emacs/Internal.hs")))
+      (message "stop")
       (haskell-emacs--stop-proc)
+      (message "compiling command")
       (haskell-emacs--compile-command heB)
-      (haskell-emacs--start-proc))))
+      (message "starting process")
+      (haskell-emacs--start-proc)
+      (message "process started")
+      )))
 
 (defun haskell-emacs--get-build-tool ()
   "Guess the build tool."
@@ -409,21 +489,37 @@ executable HaskellEmacs
 
 (defun haskell-emacs--compile-command (heB)
   "Compile haskell-emacs with buffer HEB."
-  (if (eql 1
-           (progn (message "Compiling ...")
-                  (setq test (+ ;; (call-process "cabal" nil heB nil "init")
-                              ;; (call-process "cabal" nil heB nil "install" "happy" "--overwrite-policy=always") -- just install
-                              (call-process "cabal" nil heB nil "install" "--overwrite-policy=always")))))
-      (progn
-        (message "Haskell compilation success!")
-        (kill-buffer heB))
-    (let ((bug (with-current-buffer heB (buffer-string))))
-      (kill-buffer heB)
-      (error bug))))
+  (shell-command-to-string "rm /home/admin/.local/bin/HaskellEmacs")
+  (progn (message "Compiling ...")
+         (let ((default-directory "/home/admin/nixos/deps/emacs/deps/HaskellEmacsConfig/"))
+           ;; Here I removed -fcse
+           ;; It's an obscure optimization that can affect laziness. Read more about it here:
+           ;; https://wiki.haskell.org/GHC_optimisations#Common_subexpression_elimination
+           ;; (compile "cabal install exe:HaskellEmacs --installdir=/home/admin/.local/bin/ -fcse"))
+           (my/recursive-edit-compile "cabal install -O0 exe:HaskellEmacs --installdir=/home/admin/.local/bin/"))
+
+         ;; (setq test (+ ;; (call-process "cabal" nil heB nil "init")
+         ;;             ;; (call-process "cabal" nil heB nil "install" "happy" "--overwrite-policy=always") ;; just install
+         ;;             ;; -fcse might stop Haskell from caching unsafe IO requests
+         ;;             (call-process "cabal" nil heB nil "install" "exe:HaskellEmacs" "--installdir=/home/admin/.local/bin/" ;; "--overwrite-policy=always" 
+         ;;                           "-fcse")))
+         )
+  (message "Compiled ...")
+  ;; (kill-buffer heB)
+  ;; (if (eql 1
+  ;;          )
+  ;;     (progn
+  ;;       (message "Haskell compilation success!")
+  ;;       (kill-buffer heB))
+  ;;   (let ((bug (with-current-buffer heB (buffer-string))))
+  ;;     (kill-buffer heB)
+  ;;     (error bug)))
+  )
 
 (defun haskell-emacs--set-bin ()
   "Set the path of the executable."
   (setq haskell-emacs--bin "~/.local/bin/HaskellEmacs"))
+
 
 (provide 'haskell-emacs)
 

@@ -1,3 +1,5 @@
+-- hash of haskell-emacs: be525d821fb09b64599e67edaf5a761f2346d5e1
+-- hash of all functions: 017bbe7b1a4627c0f7c07d0e01296443853e04b4
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications  #-}
@@ -8,6 +10,7 @@
 
 module Main where
 {--<<import>>--}
+import qualified My
 import           Control.Applicative              (optional, (<|>))
 import           Control.Arrow                    hiding (app)
 import           Control.Concurrent
@@ -29,7 +32,10 @@ import           Language.Haskell.Exts            hiding (List, String, Symbol,
 import qualified Language.Haskell.Exts.Syntax     as S (Name (Ident, Symbol))
 import           System.IO                        (hFlush, stdout)
 import           Data.Typeable
+import qualified Debug.Trace as Tr
+import GHC.IO (unsafePerformIO)
 
+noTrace a b = b
 -- https://gist.github.com/nushio3/5867066
 arity :: Typeable a => a -> Int
 arity x = go $ typeOf x
@@ -47,66 +53,163 @@ data Instruction = EmacsToHaskell Lisp
 
 {-@ StartDialog :: Emacs Lisp -> Nat -> Instruction @-}
 
+-- main :: IO ()
+-- main = putStrLn "testing"
 -- | Watch for commands and dispatch them in a seperate fork.
 main :: IO ()
 main = do
+  _ <- noTrace "it begins" (pure ())
   printer <- newChan
   getter  <- newEmptyMVar
   lock    <- newMVar ()
   _       <- forkIO . forever $ readChan printer >>= B.putStr >> hFlush stdout
-  is      <- fullParse <$> B.getContents
-  mapM_ (forkIO . runInstruction lock getter printer) is
+  is      <- noTrace "Parsing" (fullParse =<< B.getContents)
+  mapM_ (forkIO . (noTrace "running instruction" runInstruction lock getter printer)) is
 
 runInstruction :: MVar () -> MVar Lisp -> Chan B.ByteString -> Instruction -> IO ()
-runInstruction _ g _ (EmacsToHaskell ls)                 = putMVar g   $! ls
-runInstruction _ _ p (HaskellToEmacs msg)                = writeChan p $! msg
-runInstruction l g p (StartDialog (EmacsInternal rdr) n) = withMVar l $ \_ -> do
+runInstruction _ g _ (EmacsToHaskell ls)                 = noTrace ">>Emacs to Haskell" $ putMVar g   $! ls
+runInstruction _ _ p (HaskellToEmacs msg)                = noTrace ">>Haskell to Emacs" $ writeChan p $! msg
+runInstruction l g p (StartDialog (EmacsInternal rdr) n) = noTrace ">>Start dialog" $ withMVar l $ \_ -> do
   x <- runReaderT rdr (g, p)
   writeChan p . formatResult n $ Success x
 
 -- | Recursively evaluate a lisp in parallel, using functions defined
 -- by the user (see documentation of the emacs function `haskell-emacs-init').
 {-@ Lazy traverseLisp @-}
-traverseLisp :: Either (Emacs Lisp) Lisp -> Result (Either (Emacs Lisp) Lisp)
-traverseLisp l = case l of
-  Right (List (Symbol x:xs)) -> sym (T.filter (/='\\') x) xs
-  Right (List xs)            -> Right . List <$> evl xs
-  Right (Symbol "nil")       -> Success $ Right nil
-  _                          -> Success l
+traverseLisp :: Either (Emacs Lisp) Lisp -> IO (Result (Either (Emacs Lisp) Lisp))
+traverseLisp l = noTrace "Traversing lisp" $ case l of
+  Right (List (Symbol x:xs)) -> do
+    res <- (sym (T.filter (/='\\') (x :: Text)) (xs :: [Lisp]))
+    pure res
+  Right (List xs)            -> (fmap . fmap) (Right . List) (evl xs)
+  Right (Symbol "nil")       -> pure $ Success $ Right nil
+  _                          -> pure $ Success l
   where {-@ assume evl :: xs:[Lisp] -> Result {v:[Lisp] | len xs == len v} @-}
-        evl      = noNest <=< (sequence . parMap rdeepseq (traverseLisp . Right))
-        sym x xs = maybe (Right . List . (Symbol x:) <$> evl xs)
-                         (=<< (if length xs == 1 then head else List) <$> evl xs)
-                         $ M.lookup x dispatcher
+        -- evl      = noNest <=< (sequence . parMap rdeepseq (traverseLisp . Right))
+        evl :: [Lisp] -> IO (Result [Lisp])
+        -- evl      = noNest <=< (sequence . parMap rdeepseq (traverseLisp . Right))
+        evl lisp = do
+          -- let test = (((unsafePerformIO . traverseLisp . Right) <$> lisp))
+          let test2 = ((parMap rdeepseq (unsafePerformIO . traverseLisp . Right) lisp))
+          -- lazy version
+          -- a <- sequence (((traverseLisp . Right) <$> lisp) :: [IO (Result (Either (Emacs Lisp) Lisp))])
+          pure $ ((noNest <=< sequence) test2)
+
+        sym :: Text -> [Lisp] -> IO (Result (Either (Emacs Lisp) Lisp))
+        sym x xs = do
+          let a = (M.lookup x dispatcher) :: (Maybe (Lisp -> IO (Result (Either (Emacs Lisp) Lisp))))
+          ev <- evl xs
+          maybe (pure (Right . List . (Symbol x:) <$> ev))
+                      (\c -> do
+                         resOne <- (pure ((((if length xs == 1 then head else List) <$> ev))) :: IO (Result Lisp))
+                         let
+                           thing :: Result a -> a
+                           thing (Success a) = a
+                           thing (Error a) = noTrace "Fix the thing!!!" $ error "dam"
+
+                         resTwo <- (c :: (Lisp -> IO (Result (Either (Emacs Lisp) Lisp)))) (thing resOne)
+
+                         let
+                           eitherUnpack (Success a) = a
+                         pure resTwo) $ a
+        noNest :: [(Either (Emacs Lisp) Lisp)] -> Result [Lisp]
+        -- noNest :: [Either a a4] -> Result [a4]
+        -- noNest :: t0 (Either a a9) -> Result (t0 a9)
         noNest   = either (const (Error "Emacs monad isn't nestable."))
                           Success . sequence
 
+-- -- -- | Takes a stream of instructions and returns lazy list of
+-- -- -- results.
+-- -- {-@ Lazy fullParse @-}
+-- fullParse :: B.ByteString -> IO [Instruction]
+-- fullParse a = do
+--   let inp = noTrace "entered full parse" $ parseInput a
+--   case inp of A.Done a' b -> do
+--                 -- inp' <- noTrace ("fullparse rec with " ++ show a') $ fullParse a'
+--                 b' <- noTrace "evaling b" $ b
+--                 noTrace "good case full parse" $ pure (b' : [(EmacsToHaskell (toLisp ("test" :: String)))] -- inp'
+--                                                        )
+--               A.Fail {}   -> noTrace "fail case full parse" $ pure $ []
+
+instance Foldable Result where
+    foldMap _ (Error _) = mempty
+    foldMap f (Success a) = f a
+
+instance Traversable Result where
+    traverse _ (Error err) = pure (Error err)
+    traverse f (Success a) = Success <$> f a
+
+instance Foldable A.Result where
+    foldMap _ (A.Fail a b c) = mempty
+    foldMap f (A.Done a b) = f b
+
+instance Traversable A.Result where
+    traverse _ (A.Fail a b c) = pure (A.Fail a b c)
+    traverse f (A.Done a b) = (\a b -> A.Done b a) <*> (\c -> a) <$> (f b)
+
 -- | Takes a stream of instructions and returns lazy list of
 -- results.
-{-@ Lazy fullParse @-}
-fullParse :: B.ByteString -> [Instruction]
-fullParse a = case parseInput a of A.Done a' b -> b : fullParse a'
-                                   A.Fail {}   -> []
+-- {-@ Lazy fullParse @-}
+-- fullParse :: B.ByteString -> [Instruction]
+-- fullParse a =
+--   let test = (unsafePerformIO (sequence (parseInput a)))
+--   in case test of A.Done a' b -> b : fullParse a'
+--                   A.Fail {}   -> []
+
+
+-- {-@ Lazy fullParse @-}
+-- fullParse :: B.ByteString -> IO [Instruction]
+-- fullParse a = do
+--   test <- (sequence (parseInput a))
+--   pure $ case test of A.Done a' b -> b : (unsafePerformIO $ fullParse a')
+--                       A.Fail {}   -> []
+
+-- {-@ Lazy fullParse @
+-- https://discourse.purescript.org/t/when-to-use-control-lazy-data-lazy-or-an-explicit-lazy-function/2378
+fullParse :: B.ByteString -> IO [Instruction]
+fullParse a = do
+  test <- (sequence (parseInput a))
+  pure $ case test of A.Done a' b -> b : (unsafePerformIO $ fullParse a')
+                      A.Fail {}   -> []
+
+
+-- -- {-@ Lazy fullParse @
+-- fullParse :: B.ByteString -> IO [Instruction]
+-- fullParse a = do
+--   let inp = noTrace "entered full parse" $ parseInput a
+--   case inp of A.Done a' b -> do
+--                 inp' <- noTrace "doing the full parse again?" $ fullParse a'
+--                 b' <- noTrace "evaling b" $ b
+--                 noTrace "good case full parse" $ pure (b' : inp')
+--               A.Fail {}   -> noTrace "fail case full parse" $ pure $ []
 
 -- | Parse an instruction and stamp the number of the instruction into
 -- the result.
-parseInput :: B.ByteString -> A.Result Instruction
-parseInput = A.parse $ do
-  i          <- A.option 0 AC.decimal
-  isInternal <- isJust <$> optional "|"
-  l          <- lisp
-  return $ if isInternal
-    then EmacsToHaskell l
-    else case traverseLisp $ Right l of
-      Success (Left x)  -> StartDialog x i
-      Success (Right x) -> HaskellToEmacs . formatResult i $ Success x
-      Error x           -> HaskellToEmacs . formatResult i $ Error x
+parseInput :: B.ByteString -> (A.Result (IO Instruction))
+parseInput =
+  -- parse :: forall a. (Parser (IO Instruction)) -> ByteString -> Result (IO Instruction)
+  -- parse :: forall a. Parser a -> ByteString -> Result a
+  noTrace "parsing input DONE" $ A.parse $ do
+  i          <- noTrace "parsing input decimal" $ A.option 0 AC.decimal
+  isInternal <- noTrace "parsing input bar" $ isJust <$> optional "|"
+  ()          <- noTrace "prior to issue" $ pure ()
+  l          <- noTrace "parsing input lisp getting lisp" $ lisp
+  ()          <- noTrace "confirmed final run" $ pure ()
+  noTrace "Parsing input final" $ return $ if (noTrace "is internal" $ isInternal)
+    then noTrace "Emacs to haskell" $ pure $ EmacsToHaskell l
+    else do
+      () <- noTrace "Time to traverse" $ pure ()
+      lisp' <- traverseLisp (Right l)
+      pure $ case lisp' of
+        Success (Left x)  -> StartDialog x i
+        Success (Right x) -> HaskellToEmacs . formatResult i $ Success x
+        Error x           -> HaskellToEmacs . formatResult i $ Error x
 
 -- | Scrape the documentation of haskell functions to serve it in emacs.
 {-@ getDocumentation :: x:[Text] -> Text -> {v:[Text] | len x == len v} @-}
 getDocumentation :: [Text] -> Text -> [Text]
 getDocumentation funs code =
-  map ( \f -> T.unlines . (++) (filter (T.isPrefixOf (f <> " ::")) ls ++ [""])
+  noTrace "Get documentation" $ map ( \f -> T.unlines . (++) (filter (T.isPrefixOf (f <> " ::")) ls ++ [""])
       . reverse
       . map (T.dropWhile (`elem` ("- |" :: String)))
       . takeWhile (T.isPrefixOf "-- ")
@@ -117,7 +220,7 @@ getDocumentation funs code =
 
 {-@ formatResult :: Nat -> Result Lisp -> B.ByteString @-}
 formatResult :: Int -> Result Lisp -> B.ByteString
-formatResult i l = f $ case l of
+formatResult i l = noTrace "RESULT enter" $ f $ case l of
       Success s -> (Just $ num i, encode s)
       Error s   -> (Nothing     , errorE s)
   where f (procNum, t) = encList (num (B.length t):maybeToList procNum) <> t
@@ -126,19 +229,27 @@ formatResult i l = f $ case l of
         num            = Number . fromIntegral
 
 -- | Map of available functions which get transformed to work on lisp.
-dispatcher :: M.Map Text (Lisp -> Result (Either (Emacs Lisp) Lisp))
+dispatcher :: M.Map Text (Lisp -> IO (Result (Either (Emacs Lisp) Lisp)))
 dispatcher = M.fromList $
-  [ ("arityFormat", transform arityFormat . normalize)
-  , ("allExports",  transform allExports)
-  , ("arityList",   transform $ \() -> toDispatcher arityList)
-  , ("formatCode",  transform $ uncurry formatCode)
-  , ("getDocumentation", transform $ uncurry getDocumentation)
+  [ ("arityFormat", (\a -> pure ((transformPure arityFormat . normalize) a)))
+  , ("allExports",  (\a -> pure ((transformPure allExports) a)))
+  , ("arityList",   (\a -> pure $ (transformPure $ \() -> toDispatcher arityList) a))
+  , ("formatCode",  (\a -> pure ((transformPure $ uncurry formatCode) a)))
+  , ("getDocumentation", (\a -> pure ((transformPure $ uncurry getDocumentation) a)))
   ] ++ []{--<<export>>--}
+
+test :: String
+test = "test-fun"
 
 -- | Transform a curried function to a function which receives and
 -- returns lisp forms.
-transform :: (FromLisp a, ToEmacs b) => (a -> b) -> Lisp -> Result (Either (Emacs Lisp) Lisp)
-transform = (. fromLisp) . fmap . (toEmacs .)
+transform :: (FromLisp a, ToEmacs b) => (a -> IO b) -> Lisp -> IO (Result (Either (Emacs Lisp) Lisp))
+transform a l = noTrace "transfor enter!" $  do
+  res <- sequence $ a <$> fromLisp l
+  noTrace "Transform exit!" $ pure (toEmacs <$> res)
+
+transformPure :: (FromLisp a, ToEmacs b) => (a -> b) -> Lisp -> Result (Either (Emacs Lisp) Lisp)
+transformPure = (. fromLisp) . fmap . (toEmacs .)
 
 -- | Prevent bad input for the bootstrap.
 normalize :: Lisp -> Lisp
@@ -149,7 +260,7 @@ normalize a               = List [a]
 -- | Takes tuples of function names and their arities and returns
 -- haskell source code which gets spliced back into a module.
 toDispatcher :: [(String, Int)] -> (String, [String])
-toDispatcher = ("++"++) . prettyPrint . listE . map fun
+toDispatcher = noTrace "starting toDispatcher" $ ("++"++) . prettyPrint . listE . map fun
                &&& map (filter (\x -> x/=',' && x/='\n')
                . prettyPrint . pvarTuple . genNames "x" . snd)
   where fun (f,n) = tuple [strE f, app (function "transform")
@@ -163,7 +274,7 @@ arityList = []{--<<arity>>--}
 
 -- | Splice user functions into the haskell module.
 formatCode :: (Text, Text, Text) -> Text -> Text
-formatCode (imports, exports, arities) = inject "arity"  arities
+formatCode (imports, exports, arities) = noTrace "formatting code!" $ inject "arity"  arities
                                        . inject "export" exports
                                        . inject "import" imports
   where inject s = T.replace ("{--<<" <> s <> ">>--}")
@@ -171,7 +282,7 @@ formatCode (imports, exports, arities) = inject "arity"  arities
 -- | Import statement of all modules and all their qualified functions.
 allExports :: [String] -> Either String (String, [String])
 allExports =
-  (qualify . filter ((&&) <$> hasFunctions <*> isLibrary) <$>) .
+  noTrace "All exports enter!" $ (qualify . filter ((&&) <$> hasFunctions <*> isLibrary) <$>) .
   mapM exportsGet .
   filter (not . T.null . T.strip . T.pack)
   where
@@ -194,14 +305,14 @@ allExports =
 
 -- | List of haskell functions which get querried for their arity.
 arityFormat :: [String] -> String
-arityFormat = ("++"++) . prettyPrint
+arityFormat = noTrace "Arity format!" $ ("++"++) . prettyPrint
               . listE . map (\x -> tuple [strE x, app (function "arity")
                                                       (function x)])
 
 -- | Retrieve the name and a list of exported functions of a haskell module.
 -- It should use 'parseFileContents' to take pragmas into account.
 exportsGet :: String -> Either String (ModuleName SrcSpanInfo, [Name SrcSpanInfo])
-exportsGet content =
+exportsGet content = noTrace "Exports get" $
   case parseSrc of
     ParseOk mdl ->
       case mdl of
